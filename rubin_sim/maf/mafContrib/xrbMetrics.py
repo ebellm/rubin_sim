@@ -365,18 +365,36 @@ class XRBPopMetric(BaseMetric):
         result = {}
         t = dataSlice[self.mjdCol] - self.mjd0 - slicePoint["start_time"]
         mags = np.zeros(t.size, dtype=float)
+        quiescent_abs_mags = slicePoint["outburst_params"]["abs_mag"]
+        quiescent_mags = {}
+        coadd_m5s = {}
+        detected_quiescent = False
+        detected_quiescent_coadd = False
+        
 
         for filtername in np.unique(dataSlice[self.filterCol]):
             infilt = np.where(dataSlice[self.filterCol] == filtername)
             mags[infilt] = self.lightcurves.lightcurve(
                 t[infilt], filtername, slicePoint["outburst_params"]
             )
+            coadd_m5s[filtername]= 1.25 * np.log10(
+                np.sum(10.0 ** (0.8 * dataSlice[self.m5Col][infilt]))
+            )
             # Apply dust extinction on the light curve
             A_x = self.Ax1[filtername] * slicePoint["ebv"]
             mags[infilt] += A_x
+            quiescent_mags[filtername] = quiescent_abs_mags[filtername] + A_x
 
             distmod = 5 * np.log10(slicePoint["distance"] * 1.0e3) - 5.0
             mags[infilt] += distmod
+            quiescent_mags[filtername] += distmod
+
+            detected_quiescent |= np.any(quiescent_mags[filtername] <=
+                                         dataSlice[self.m5Col][infilt])
+
+            detected_quiescent_coadd |= (quiescent_mags[filtername] <= 
+                                               coadd_m5s[filtername])
+
 
         # Find the detected points
         where_detected = np.where((mags < dataSlice[self.m5Col]))[0]
@@ -384,19 +402,28 @@ class XRBPopMetric(BaseMetric):
         snr = m52snr(mags, dataSlice[self.m5Col])
         mags_unc = 2.5 * np.log10(1.0 + 1.0 / snr)
 
+        
+
+        # determine detectable duration (hypothetical earliest/latest detections)
+        start, end = self.lightcurves.detectable_duration(slicePoint['outburst_params'],
+                slicePoint["ebv"],slicePoint["distance"])
+        visible_duration = end - start
+
         result["possible_to_detect"] = self._possible_to_detect(
-            slicePoint["visible_duration"]
-        )
+            visible_duration)
+
         result["ever_detect"] = self._ever_detect(where_detected)
         result["early_detect"] = self._early_detect(where_detected, t)
         result["number_of_detections"] = self._number_of_detections(where_detected)
+        result["quiescent_detect"] = detected_quiescent
+        result["quiescent_coadd_detect"] = detected_quiescent_coadd
 
         if result["number_of_detections"] > 1:
             result["mean_time_between_detections"] = self._mean_time_between_detections(
                 [
-                    slicePoint["visible_start_time"],
+                    start,
                     *t[where_detected].tolist(),
-                    slicePoint["visible_end_time"],
+                    end
                 ]
             )
         else:
@@ -425,6 +452,12 @@ class XRBPopMetric(BaseMetric):
 
     def reduce_early_detect(self, metric):
         return metric["early_detect"]
+
+    def reduce_quiescent_detect(self, metric):
+        return metric["quiescent_detect"]
+
+    def reduce_quiescent_coadd_detect(self, metric):
+        return metric["quiescent_coadd_detect"]
 
     def reduce_number_of_detections(self, metric):
         return metric["number_of_detections"]
@@ -482,19 +515,5 @@ def generateXRBPopSlicer(t_start=1, t_end=3652, n_events=10000, seed=42):
     slicer.slicePoints["ebv"] = ebv
     # generate random parameters for this event
     slicer.slicePoints["outburst_params"] = xrb_lc_gen.outburst_params(size=n_events)
-
-    # determine detectable durations
-    visible_starts = []
-    visible_ends = []
-    visible_durations = []
-    for idx, param in enumerate(slicer.slicePoints["outburst_params"]):
-        start, end = xrb_lc_gen.detectable_duration(param, ebv[idx], distance_kpc[idx])
-        visible_starts.append(start)
-        visible_ends.append(end)
-        visible_durations.append(end - start)
-
-    slicer.slicePoints["visible_start_time"] = visible_starts
-    slicer.slicePoints["visible_end_time"] = visible_ends
-    slicer.slicePoints["visible_duration"] = visible_durations
 
     return slicer
